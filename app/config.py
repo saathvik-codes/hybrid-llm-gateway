@@ -20,6 +20,19 @@ class Settings(BaseSettings):
     COMPLEXITY_THRESHOLD_CHARS: int = 150
     CACHE_DB_PATH: str = "./semantic_cache.json"
 
+    # Cache storage: "file" (JSON on disk, default) or "redis" (shared by every replica)
+    CACHE_BACKEND: str = "file"
+    REDIS_URL: str = "redis://localhost:6379/0"
+    REDIS_KEY_PREFIX: str = "gateway"
+    CACHE_REFRESH_SECONDS: float = 5.0     # redis only: how often a replica re-reads entries written by the others
+
+    # Cost policy: once cloud spend for the (UTC) day reaches this, complex prompts are answered locally and
+    # force_cloud requests are refused. 0 turns the policy off.
+    DAILY_BUDGET_USD: float = 0.0
+
+    # gRPC front end next to the REST API (0 turns it off)
+    GRPC_PORT: int = 50051
+
     # Load from .env file
     model_config = SettingsConfigDict(
         env_file=os.path.join(os.path.dirname(os.path.dirname(__file__)), ".env"),

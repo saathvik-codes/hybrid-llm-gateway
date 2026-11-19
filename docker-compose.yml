@@ -1,0 +1,39 @@
+# docker compose up --build                       gateway + Redis (cloud model only)
+# docker compose --profile local-llm up --build   adds Ollama for the local model and embeddings
+#   docker compose exec ollama ollama pull llama3 && docker compose exec ollama ollama pull nomic-embed-text
+services:
+  gateway:
+    build: .
+    ports:
+      - "8000:8000"      # REST + dashboard + /metrics
+      - "50051:50051"    # gRPC
+    environment:
+      CACHE_BACKEND: redis
+      REDIS_URL: redis://redis:6379/0
+      OLLAMA_BASE_URL: http://ollama:11434
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      DAILY_BUDGET_USD: ${DAILY_BUDGET_USD:-0}
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  ollama:
+    image: ollama/ollama:latest
+    profiles: ["local-llm"]
+    volumes:
+      - ollama-models:/root/.ollama
+
+volumes:
+  redis-data:
+  ollama-models:

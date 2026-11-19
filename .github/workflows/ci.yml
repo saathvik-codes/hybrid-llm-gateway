@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+      - run: pip install -r requirements-dev.txt
+      - name: Generate gRPC stubs
+        run: python scripts/gen_proto.py
+      - name: Tests
+        run: python -m pytest -q
+
+  docker:
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the image
+        run: docker build -t hybrid-llm-gateway:ci .
+      - name: Start it and check /health and /metrics
+        run: |
+          docker run -d --name gw -p 8000:8000 hybrid-llm-gateway:ci
+          for i in $(seq 1 20); do curl -fs localhost:8000/health && break || sleep 1; done
+          curl -fs localhost:8000/health
+          curl -fs localhost:8000/metrics | grep -q gateway_requests_total
+          docker logs gw | grep -q "gRPC server listening"
+
+  manifests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate the Kubernetes manifests
+        run: |
+          curl -sL https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz | tar xz
+          ./kubeconform -strict -summary k8s/

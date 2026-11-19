@@ -1,11 +1,12 @@
-import time
 import os
 import logging
-from fastapi import FastAPI, HTTPException, Depends, BackgroundTasks
+from fastapi import FastAPI, HTTPException, Depends, BackgroundTasks, Response
 from fastapi.responses import HTMLResponse
 from contextlib import asynccontextmanager
 
+from app import metrics
 from app.config import settings
+from app.core import GatewayCore, GatewayError, budget, build_core
 from app.models import QueryRequest, QueryResponse
 from app.services.ollama_service import OllamaService
 from app.services.cloud_service import CloudService
@@ -17,30 +18,41 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(na
 logger = logging.getLogger("gateway")
 
 # Services & Cache Lifespan Manager
+core: GatewayCore | None = None
 ollama_service = None
 cloud_service = None
 semantic_cache = None
 prompt_router = None
+grpc_server = None
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global ollama_service, cloud_service, semantic_cache, prompt_router
+    global core, ollama_service, cloud_service, semantic_cache, prompt_router, grpc_server
     logger.info("Initializing services...")
-    ollama_service = OllamaService()
-    cloud_service = CloudService()
-    semantic_cache = SemanticCache()
-    prompt_router = PromptRouter()
-    
+    core = build_core()
+    ollama_service, cloud_service, semantic_cache, prompt_router = core.ollama, core.cloud, core.cache, core.router
+    metrics.BUDGET_LEFT.set(budget.remaining())
+
+    if settings.GRPC_PORT:
+        try:
+            from app.grpc_server import start_grpc
+            grpc_server = await start_grpc(core, settings.GRPC_PORT)
+            logger.info("gRPC server listening on :%s", settings.GRPC_PORT)
+        except ImportError:
+            logger.warning("gRPC stubs not generated (run: python scripts/gen_proto.py); REST only.")
+
     yield
-    
+
     logger.info("Closing connections...")
-    await ollama_service.close()
-    await cloud_service.close()
+    if grpc_server:
+        await grpc_server.stop(grace=5)
+    await core.close()
 
 app = FastAPI(
     title="Hybrid LLM Router & Cache Gateway",
     description="Production-grade API Gateway with Semantic Caching and Local-to-Cloud Routing",
-    version="1.0.0",
+    version="1.1.0",
     lifespan=lifespan
 )
 
@@ -63,7 +75,7 @@ async def serve_dashboard():
     template_path = os.path.join(os.path.dirname(__file__), "templates", "index.html")
     if not os.path.exists(template_path):
         raise HTTPException(status_code=404, detail="Dashboard template not found.")
-    
+
     with open(template_path, "r", encoding="utf-8") as f:
         html_content = f.read()
     return HTMLResponse(content=html_content)
@@ -77,89 +89,10 @@ async def query_gateway(
     cache: SemanticCache = Depends(get_cache),
     router: PromptRouter = Depends(get_router)
 ):
-    start_time = time.time()
-    prompt = request.prompt
-    
-    # 1. Try Semantic Cache first (unless forced to bypass)
-    if not request.force_cloud:
-        cached_response, similarity = await cache.get(prompt, ollama)
-        if cached_response is not None:
-            latency_ms = (time.time() - start_time) * 1000.0
-            return QueryResponse(
-                response=cached_response,
-                source=f"cache (similarity: {similarity:.4f})",
-                latency_ms=round(latency_ms, 2),
-                tokens_used=0,
-                cost_usd=0.0
-            )
-
-    # 2. Determine routing logic (Local SLM vs. Cloud LLM)
-    is_cloud_route = request.force_cloud or router.is_complex(prompt)
-    
-    response_text = ""
-    source = ""
-    tokens = 0
-    cost = 0.0
-
-    if not is_cloud_route:
-        # Route to Local SLM (Ollama)
-        logger.info("Routing query to Local SLM (Ollama)...")
-        if await ollama.is_healthy():
-            try:
-                response_text = await ollama.generate(
-                    prompt=prompt,
-                    temperature=request.temperature,
-                    max_tokens=request.max_tokens
-                )
-                source = "local_slm"
-            except Exception as e:
-                logger.error(f"Local SLM generation failed: {e}. Falling back to Cloud LLM.")
-                is_cloud_route = True
-        else:
-            logger.warning("Local Ollama server is unhealthy. Falling back to Cloud LLM.")
-            is_cloud_route = True
-
-    if is_cloud_route:
-        # Route to Cloud LLM (Gemini)
-        logger.info("Routing query to Cloud LLM (Gemini)...")
-        try:
-            response_text, tokens, cost = await cloud.generate(
-                prompt=prompt,
-                temperature=request.temperature,
-                max_tokens=request.max_tokens
-            )
-            source = "cloud_llm" if not request.force_cloud and router.is_complex(prompt) else "cloud_llm_forced"
-            if source == "cloud_llm" and not router.is_complex(prompt):
-                source = "cloud_llm_fallback"
-        except Exception as e:
-            logger.error(f"Cloud LLM generation failed: {e}")
-            if not request.force_cloud and await ollama.is_healthy():
-                logger.info("Attempting local SLM fallback...")
-                try:
-                    response_text = await ollama.generate(
-                        prompt=prompt,
-                        temperature=request.temperature,
-                        max_tokens=request.max_tokens
-                    )
-                    source = "local_slm_fallback"
-                except Exception as local_err:
-                    logger.error(f"Local fallback also failed: {local_err}")
-                    raise HTTPException(status_code=502, detail=f"Both cloud and local models failed. Cloud error: {e}")
-            else:
-                raise HTTPException(status_code=502, detail=f"Cloud model execution failed and no fallback possible. Error: {e}")
-
-    # 3. Store in semantic cache in the BACKGROUND (non-blocking)
-    if response_text:
-        background_tasks.add_task(cache.set, prompt, response_text, ollama)
-
-    latency_ms = (time.time() - start_time) * 1000.0
-    return QueryResponse(
-        response=response_text,
-        source=source,
-        latency_ms=round(latency_ms, 2),
-        tokens_used=tokens,
-        cost_usd=cost
-    )
+    try:
+        return await GatewayCore(ollama, cloud, cache, router).handle(request, background_tasks.add_task)
+    except GatewayError as e:
+        raise HTTPException(status_code=e.status_code, detail=e.detail)
 
 # Admin Cache Endpoints
 @app.get("/api/cache")
@@ -192,15 +125,27 @@ async def clear_cache(cache: SemanticCache = Depends(get_cache)):
 async def cache_stats(cache: SemanticCache = Depends(get_cache)):
     return {
         "cache_entries_count": len(cache.entries),
+        "cache_backend": settings.CACHE_BACKEND,
         "cache_db_path": settings.CACHE_DB_PATH,
         "similarity_threshold": settings.SIMILARITY_THRESHOLD
     }
+
+@app.get("/budget")
+async def budget_status():
+    """Today's cloud spend against the daily cap (remaining is -1 when no cap is set)."""
+    return {"daily_limit_usd": budget.daily_limit_usd, "spent_today_usd": round(budget.spent_today, 6),
+            "remaining_usd": budget.remaining(), "exceeded": budget.exceeded()}
+
+@app.get("/metrics")
+async def prometheus_metrics():
+    body, content_type = metrics.render()
+    return Response(content=body, media_type=content_type)
 
 @app.get("/health")
 async def health_check(ollama: OllamaService = Depends(get_ollama_service)):
     ollama_healthy = await ollama.is_healthy()
     gemini_configured = bool(settings.GEMINI_API_KEY)
-    
+
     return {
         "status": "healthy" if ollama_healthy or gemini_configured else "degraded",
         "local_ollama_connected": ollama_healthy,

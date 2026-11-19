@@ -1,3 +1,4 @@
+# pyrefly: ignore [missing-import]
 import httpx
 import asyncio
 from app.config import settings
@@ -26,7 +27,9 @@ class CloudService:
         if not self.api_key:
             raise ValueError("GEMINI_API_KEY is not configured in environment variables.")
 
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={self.api_key}"
+        # the key travels in a header, never in the URL, so it can't end up in access logs or error messages
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+        headers = {"x-goog-api-key": self.api_key}
         payload = {
             "contents": [
                 {
@@ -44,7 +47,7 @@ class CloudService:
 
         while True:
             try:
-                response = await self.client.post(url, json=payload)
+                response = await self.client.post(url, json=payload, headers=headers)
                 
                 # Check for rate limits or server errors
                 if response.status_code == 429:

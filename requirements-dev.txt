@@ -1,0 +1,6 @@
+-r requirements.txt
+pytest>=8,<10
+pytest-asyncio>=0.24,<2
+grpcio-tools>=1.64,<2     # generates the gRPC stubs (scripts/gen_proto.py)
+fakeredis>=2.23,<3        # in-memory Redis for the cache tests
+pyyaml>=6,<7              # parses the Kubernetes manifests in tests

@@ -1,0 +1,14 @@
+.venv/
+venv/
+.git/
+.github/
+__pycache__/
+*.pyc
+.pytest_cache/
+tests/
+k8s/
+semantic_cache.json
+test_cache.json
+.env
+app/gateway_pb2.py
+app/gateway_pb2_grpc.py

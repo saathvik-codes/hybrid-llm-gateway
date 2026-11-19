@@ -1,0 +1,32 @@
+syntax = "proto3";
+
+package gateway.v1;
+
+// The same gateway as the REST API, for service-to-service callers.
+service Gateway {
+  rpc Query (QueryRequest) returns (QueryResponse);
+  rpc Health (HealthRequest) returns (HealthResponse);
+}
+
+message QueryRequest {
+  string prompt = 1;
+  float temperature = 2;      // 0 means "use the default (0.7)"
+  int32 max_tokens = 3;       // 0 means "use the default (1000)"
+  bool force_cloud = 4;
+}
+
+message QueryResponse {
+  string response = 1;
+  string source = 2;          // cache, local_slm, cloud_llm, ...
+  double latency_ms = 3;
+  int32 tokens_used = 4;
+  double cost_usd = 5;
+}
+
+message HealthRequest {}
+
+message HealthResponse {
+  string status = 1;
+  bool local_connected = 2;
+  bool cloud_configured = 3;
+}

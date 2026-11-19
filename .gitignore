@@ -39,3 +39,10 @@ coverage.xml
 *.swo
 .DS_Store
 Thumbs.db
+
+# generated gRPC stubs (python scripts/gen_proto.py) and local state
+app/gateway_pb2.py
+app/gateway_pb2_grpc.py
+semantic_cache.json
+test_cache.json
+.pytest_cache/

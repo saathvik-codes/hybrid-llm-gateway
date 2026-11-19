@@ -1,0 +1,97 @@
+# kubectl apply -f k8s/
+# Create the secret first (never commit it):
+#   kubectl create secret generic gateway-secrets --from-literal=GEMINI_API_KEY=...
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gateway-config
+  labels: {app: hybrid-llm-gateway}
+data:
+  CACHE_BACKEND: "redis"
+  REDIS_URL: "redis://redis:6379/0"
+  OLLAMA_BASE_URL: "http://ollama:11434"
+  SIMILARITY_THRESHOLD: "0.95"
+  DAILY_BUDGET_USD: "5"
+  GRPC_PORT: "50051"
+  DEBUG: "false"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hybrid-llm-gateway
+  labels: {app: hybrid-llm-gateway}
+spec:
+  replicas: 2
+  selector:
+    matchLabels: {app: hybrid-llm-gateway}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: {maxUnavailable: 0, maxSurge: 1}
+  template:
+    metadata:
+      labels: {app: hybrid-llm-gateway}
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8000"
+        prometheus.io/path: /metrics
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+      containers:
+        - name: gateway
+          image: hybrid-llm-gateway:1.1.0
+          ports:
+            - {name: http, containerPort: 8000}
+            - {name: grpc, containerPort: 50051}
+          envFrom:
+            - configMapRef: {name: gateway-config}
+            - secretRef: {name: gateway-secrets, optional: true}
+          readinessProbe:
+            httpGet: {path: /health, port: http}
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: {path: /health, port: http}
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          resources:
+            requests: {cpu: 100m, memory: 192Mi}
+            limits: {cpu: "1", memory: 512Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: ["ALL"]}
+          volumeMounts:
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: hybrid-llm-gateway
+  labels: {app: hybrid-llm-gateway}
+spec:
+  selector: {app: hybrid-llm-gateway}
+  ports:
+    - {name: http, port: 80, targetPort: http}
+    - {name: grpc, port: 50051, targetPort: grpc}
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: hybrid-llm-gateway
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: hybrid-llm-gateway
+  minReplicas: 2
+  maxReplicas: 8
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target: {type: Utilization, averageUtilization: 70}
