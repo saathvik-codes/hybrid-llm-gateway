@@ -37,7 +37,7 @@ jobs:
           for i in $(seq 1 20); do curl -fs localhost:8000/health && break || sleep 1; done
           curl -fs localhost:8000/health
           curl -fs localhost:8000/metrics | grep -q gateway_requests_total
-          docker logs gw | grep -q "gRPC server listening"
+          docker logs gw 2>&1 | grep -q "gRPC server listening"
 
   manifests:
     runs-on: ubuntu-latest
