@@ -31,6 +31,8 @@ jobs:
       - uses: actions/checkout@v4
       - name: Build the image
         run: docker build -t hybrid-llm-gateway:ci .
+      - name: Build the AWS Lambda image
+        run: docker build -f Dockerfile.lambda -t hybrid-llm-gateway-lambda:ci .
       - name: Start it and check /health and /metrics
         run: |
           docker run -d --name gw -p 8000:8000 hybrid-llm-gateway:ci

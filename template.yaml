@@ -1,0 +1,75 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  Hybrid LLM Gateway on AWS - FastAPI on Lambda (container image) behind an API Gateway HTTP API, with the semantic
+  cache in DynamoDB so every Lambda instance shares it. Deploy with: sam build && sam deploy --guided
+
+Parameters:
+  GeminiApiKey:
+    Type: String
+    NoEcho: true
+    Default: ""
+    Description: Google Gemini API key for the cloud model (leave empty to run local-model only).
+  OllamaBaseUrl:
+    Type: String
+    Default: ""
+    Description: URL of an Ollama server for the local model and embeddings (the cache needs embeddings).
+  DailyBudgetUsd:
+    Type: Number
+    Default: 5
+    MinValue: 0
+    Description: Cloud spend cap per UTC day, per Lambda instance (0 = off).
+
+Globals:
+  Function:
+    Timeout: 60
+    MemorySize: 1024
+    Architectures: [x86_64]
+
+Resources:
+  CacheTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: id
+          KeyType: HASH
+      SSESpecification:
+        SSEEnabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+
+  GatewayFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      PackageType: Image
+      Environment:
+        Variables:
+          CACHE_BACKEND: dynamodb
+          DYNAMODB_TABLE: !Ref CacheTable
+          GRPC_PORT: "0"
+          DEBUG: "false"
+          DAILY_BUDGET_USD: !Ref DailyBudgetUsd
+          GEMINI_API_KEY: !Ref GeminiApiKey
+          OLLAMA_BASE_URL: !Ref OllamaBaseUrl
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref CacheTable
+      Events:
+        Api:
+          Type: HttpApi
+    Metadata:
+      Dockerfile: Dockerfile.lambda
+      DockerContext: .
+      DockerTag: python3.12-v1
+
+Outputs:
+  ApiUrl:
+    Description: Base URL of the gateway
+    Value: !Sub "https://${ServerlessHttpApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}/"
+  CacheTableName:
+    Description: DynamoDB table holding the semantic cache
+    Value: !Ref CacheTable

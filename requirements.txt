@@ -12,3 +12,5 @@ protobuf>=5,<8
 prometheus-client>=0.20,<1
 redis>=5,<9
 mcp>=1.12,<3
+boto3>=1.34,<2           # DynamoDB cache backend
+mangum>=0.17,<1          # FastAPI on AWS Lambda

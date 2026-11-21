@@ -4,3 +4,5 @@ pytest-asyncio>=0.24,<2
 grpcio-tools>=1.64,<2     # generates the gRPC stubs (scripts/gen_proto.py)
 fakeredis>=2.23,<3        # in-memory Redis for the cache tests
 pyyaml>=6,<7              # parses the Kubernetes manifests in tests
+moto[dynamodb]>=5,<6     # in-memory AWS for the DynamoDB tests
+cfn-lint>=1,<2           # validates the SAM template

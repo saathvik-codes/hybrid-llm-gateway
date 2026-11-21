@@ -60,7 +60,7 @@ pip install -r requirements-dev.txt
 python scripts/gen_proto.py                          # generates the gRPC stubs into app/
 cp .env.example .env                                 # add GEMINI_API_KEY
 uvicorn app.main:app --port 8000                     # REST on :8000, gRPC on :50051
-python -m pytest -q                                  # 54 tests
+python -m pytest -q                                  # 61 tests
 ```
 
 Local model (optional, enables the local route and the semantic cache): `ollama pull llama3 && ollama pull nomic-embed-text`.
@@ -77,6 +77,19 @@ kubectl apply -f k8s/                                # Deployment (2 replicas, p
                                                      # HPA (2-8 pods at 70% CPU), Redis + PVC
 ```
 Point `OLLAMA_BASE_URL` in `k8s/gateway.yaml` at your Ollama. The manifests are schema-validated in CI.
+
+### AWS (Lambda + API Gateway + DynamoDB)
+
+```bash
+sam build                       # builds the Lambda container image (Dockerfile.lambda)
+sam deploy --guided             # asks for the Gemini key (NoEcho), Ollama URL and daily budget; prints ApiUrl
+```
+`template.yaml` creates an API Gateway HTTP API, the gateway as a container-image Lambda (FastAPI through Mangum), and a
+DynamoDB table (on-demand, encrypted, point-in-time recovery) that holds the semantic cache, so every Lambda instance
+shares cached answers. The function's IAM role can read and write that one table and nothing else. gRPC is off on Lambda
+(API Gateway speaks HTTP). The DynamoDB backend is tested against moto's in-memory AWS and the template is checked with
+`cfn-lint` on every CI run. Two things differ from the container deployment: the daily budget is tracked per Lambda
+instance, and the local model needs an Ollama server reachable from AWS (`OllamaBaseUrl`).
 
 ### Using it
 
@@ -103,7 +116,8 @@ MCP client config:
 | `OLLAMA_BASE_URL`, `OLLAMA_MODEL`, `OLLAMA_EMBED_MODEL` | `localhost:11434`, `llama3`, `nomic-embed-text` | local model |
 | `SIMILARITY_THRESHOLD` | `0.95` | cache match |
 | `COMPLEXITY_THRESHOLD_CHARS` | `150` | longer prompts go to the cloud |
-| `CACHE_BACKEND` | `file` | `file` or `redis` |
+| `CACHE_BACKEND` | `file` | `file`, `redis` or `dynamodb` |
+| `DYNAMODB_TABLE`, `AWS_REGION` | `hybrid-llm-gateway-cache`, `ap-south-1` | DynamoDB cache (AWS) |
 | `REDIS_URL`, `CACHE_REFRESH_SECONDS` | `redis://localhost:6379/0`, `5` | shared cache |
 | `DAILY_BUDGET_USD` | `0` (off) | cloud spend cap per UTC day |
 | `GRPC_PORT` | `50051` | `0` turns gRPC off |
@@ -127,7 +141,7 @@ app/
   router.py          complexity rules            services/        Ollama and Gemini clients
 proto/gateway.proto  gRPC contract               scripts/         gen_proto.py, bench.py
 k8s/  Dockerfile  docker-compose.yml  .github/workflows/ci.yml
-tests/               54 tests: routing, fallbacks, budget, cache, Redis replicas, gRPC, MCP, deploy files
+tests/               61 tests: routing, fallbacks, budget, cache, Redis and DynamoDB replicas, gRPC, MCP, Lambda, deploy files
 ```
 
 ## Limits

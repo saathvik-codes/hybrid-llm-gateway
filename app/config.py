@@ -24,7 +24,11 @@ class Settings(BaseSettings):
     CACHE_BACKEND: str = "file"
     REDIS_URL: str = "redis://localhost:6379/0"
     REDIS_KEY_PREFIX: str = "gateway"
-    CACHE_REFRESH_SECONDS: float = 5.0     # redis only: how often a replica re-reads entries written by the others
+    CACHE_REFRESH_SECONDS: float = 5.0     # redis / dynamodb: how often a replica re-reads entries written by others
+
+    # AWS (CACHE_BACKEND=dynamodb, and the Lambda deployment in template.yaml)
+    AWS_REGION: str = "ap-south-1"
+    DYNAMODB_TABLE: str = "hybrid-llm-gateway-cache"
 
     # Cost policy: once cloud spend for the (UTC) day reaches this, complex prompts are answered locally and
     # force_cloud requests are refused. 0 turns the policy off.

@@ -1,0 +1,7 @@
+# Lambda container image (template.yaml). Only the app and its runtime dependencies go in; gRPC is off on Lambda,
+# so the generated stubs aren't needed.
+FROM public.ecr.aws/lambda/python:3.12
+COPY requirements.txt ${LAMBDA_TASK_ROOT}/
+RUN pip install --no-cache-dir -r ${LAMBDA_TASK_ROOT}/requirements.txt
+COPY app ${LAMBDA_TASK_ROOT}/app
+CMD ["app.lambda_handler.handler"]

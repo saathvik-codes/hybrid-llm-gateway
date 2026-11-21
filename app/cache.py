@@ -231,8 +231,82 @@ class RedisSemanticCache(SemanticCache):
             logger.error(f"Failed to clear the cache in Redis: {e}")
 
 
+class DynamoDBSemanticCache(SemanticCache):
+    """
+    Same cache, with entries in an Amazon DynamoDB table (partition key `id`), for the serverless deployment where
+    every Lambda instance is a separate process. Like the Redis backend, each instance searches its own in-memory
+    index and re-reads the table every CACHE_REFRESH_SECONDS; an AWS error degrades to a cache miss, never a failure.
+    """
+
+    def __init__(self, table=None, threshold: float = settings.SIMILARITY_THRESHOLD,
+                 refresh_seconds: float = settings.CACHE_REFRESH_SECONDS):
+        if table is None:
+            import boto3
+            table = boto3.resource("dynamodb", region_name=settings.AWS_REGION).Table(settings.DYNAMODB_TABLE)
+        self.table, self.refresh_seconds = table, refresh_seconds
+        self._last_refresh = 0.0
+        super().__init__(db_path="", threshold=threshold)
+
+    def load_cache(self):
+        self.entries = []
+        try:
+            kwargs = {}
+            while True:                                  # Scan is paginated (1 MB per page)
+                page = self.table.scan(**kwargs)
+                for item in page.get("Items", []):
+                    self.entries.append(CacheEntry(**json.loads(item["entry"])))
+                if "LastEvaluatedKey" not in page:
+                    break
+                kwargs["ExclusiveStartKey"] = page["LastEvaluatedKey"]
+            logger.info(f"Loaded {len(self.entries)} entries from DynamoDB.")
+        except Exception as e:
+            logger.error(f"Failed to load the cache from DynamoDB: {e}")
+        self._last_refresh = time.monotonic()
+        self._reindex()
+
+    def _needs_refresh(self) -> bool:
+        return time.monotonic() - self._last_refresh >= self.refresh_seconds
+
+    def _refresh(self) -> None:
+        self.load_cache()
+
+    def save_cache(self):
+        """Nothing to do: every change is written to DynamoDB as it happens."""
+
+    def _persist_put(self, entry: CacheEntry) -> None:
+        try:
+            # the entry is stored as one JSON string: DynamoDB numbers are Decimals, and a 768-float embedding as a
+            # string is smaller and faster to read back than a list attribute
+            self.table.put_item(Item={"id": entry.id, "entry": json.dumps(entry.model_dump())})
+        except Exception as e:
+            logger.error(f"Failed to write the cache entry to DynamoDB: {e}")
+
+    def _persist_delete(self, entry_id: str) -> None:
+        try:
+            self.table.delete_item(Key={"id": entry_id})
+        except Exception as e:
+            logger.error(f"Failed to delete the cache entry in DynamoDB: {e}")
+
+    def _persist_clear(self) -> None:
+        try:
+            kwargs = {"ProjectionExpression": "id"}
+            with self.table.batch_writer() as batch:
+                while True:
+                    page = self.table.scan(**kwargs)
+                    for item in page.get("Items", []):
+                        batch.delete_item(Key={"id": item["id"]})
+                    if "LastEvaluatedKey" not in page:
+                        break
+                    kwargs["ExclusiveStartKey"] = page["LastEvaluatedKey"]
+        except Exception as e:
+            logger.error(f"Failed to clear the cache in DynamoDB: {e}")
+
+
 def build_cache() -> SemanticCache:
-    """The cache chosen by CACHE_BACKEND ("file" or "redis")."""
-    if settings.CACHE_BACKEND.lower() == "redis":
+    """The cache chosen by CACHE_BACKEND ("file", "redis" or "dynamodb")."""
+    backend = settings.CACHE_BACKEND.lower()
+    if backend == "redis":
         return RedisSemanticCache()
+    if backend == "dynamodb":
+        return DynamoDBSemanticCache()
     return SemanticCache()
