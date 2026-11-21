@@ -46,3 +46,5 @@ app/gateway_pb2_grpc.py
 semantic_cache.json
 test_cache.json
 .pytest_cache/
+samconfig.toml
+.aws-sam/

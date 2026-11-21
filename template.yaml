@@ -23,7 +23,7 @@ Parameters:
 Globals:
   Function:
     Timeout: 60
-    MemorySize: 1024
+    MemorySize: 512           # enough for the gateway; some AWS free-plan projects cap Lambda at 512 MB
     Architectures: [x86_64]
 
 Resources:
