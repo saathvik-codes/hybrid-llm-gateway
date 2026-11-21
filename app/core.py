@@ -39,9 +39,13 @@ class GatewayCore:
         self.ollama, self.cloud, self.cache, self.router = ollama, cloud, cache, router
         self.policy = policy or budget
 
-    async def handle(self, req: QueryRequest, schedule: Scheduler) -> QueryResponse:
+    async def handle(self, req: QueryRequest, schedule: Scheduler, own_key: bool = False) -> QueryResponse:
+        """own_key: the caller brought their own cloud key, so their spend isn't counted against the shared daily
+        budget and their prompts and answers aren't written to the shared cache (other visitors can list it)."""
         start = time.perf_counter()
         prompt = req.prompt
+        if own_key:
+            schedule = lambda *args: None          # noqa: E731  (cache reads still help them; writes would publish them)
 
         # 1. semantic cache (skipped when the caller insists on the cloud model)
         if not req.force_cloud:
@@ -53,7 +57,7 @@ class GatewayCore:
 
         # 2. route: complex prompts go to the cloud model, the rest to the local one, unless the budget says otherwise
         wants_cloud = req.force_cloud or self.router.is_complex(prompt)
-        if wants_cloud and self.policy.exceeded():
+        if wants_cloud and not own_key and self.policy.exceeded():
             if req.force_cloud:
                 metrics.BUDGET_REJECTIONS.labels("rejected").inc()
                 raise GatewayError(429, f"Daily cloud budget of ${self.policy.daily_limit_usd:.2f} is used up.")
@@ -82,6 +86,9 @@ class GatewayCore:
         except Exception as e:
             metrics.PROVIDER_ERRORS.labels("gemini").inc()
             logger.error("Cloud model failed (%s).", type(e).__name__)
+            status = getattr(getattr(e, "response", None), "status_code", None)
+            if own_key and status in (400, 401, 403):
+                raise GatewayError(502, f"Gemini rejected your key (HTTP {status}). Check it at aistudio.google.com/apikey.") from e
             if req.force_cloud or not await self.ollama.is_healthy():
                 raise GatewayError(502, f"Cloud model failed and no fallback was possible: {type(e).__name__}") from e
             try:
@@ -91,10 +98,11 @@ class GatewayCore:
                 raise GatewayError(502, f"Both cloud and local models failed: {type(local_err).__name__}") from local_err
             return self._finish(start, text, "local_slm_fallback", schedule, prompt)
 
-        self.policy.record(cost)
         metrics.TOKENS.inc(tokens)
-        metrics.COST.inc(cost)
-        metrics.BUDGET_LEFT.set(self.policy.remaining())
+        if not own_key:
+            self.policy.record(cost)
+            metrics.COST.inc(cost)
+            metrics.BUDGET_LEFT.set(self.policy.remaining())
         return self._finish(start, text, cloud_source, schedule, prompt, tokens, cost)
 
     async def _local(self, req: QueryRequest, source: str) -> str:

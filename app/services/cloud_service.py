@@ -87,8 +87,10 @@ class CloudService:
                 return response_text, total_tokens, cost_usd
                 
             except (httpx.HTTPError, ValueError) as e:
-                logger.error(f"Gemini API error during generation (attempt {retries + 1}/{max_retries + 1}): {e}")
-                if retries >= max_retries:
+                logger.error("Gemini API error during generation (attempt %d/%d): %s", retries + 1, max_retries + 1, type(e).__name__)
+                client_error = isinstance(e, httpx.HTTPStatusError) and 400 <= e.response.status_code < 500 \
+                    and e.response.status_code != 429
+                if retries >= max_retries or client_error:      # a bad key or request won't get better by retrying
                     raise e
                 await asyncio.sleep(backoff_sec)
                 retries += 1

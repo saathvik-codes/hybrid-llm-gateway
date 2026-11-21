@@ -101,6 +101,45 @@ async def test_budget_runs_out_mid_stream(make_core):
     assert sources == ["cloud_llm", "cloud_llm", "local_slm_budget"]      # 0.002 each: the third call is over the cap
 
 
+@pytest.mark.asyncio
+async def test_own_key_skips_shared_budget_and_cache_writes(make_core):
+    core, ollama, cloud, cache, _ = make_core(complex_prompt=True, limit=0.001)
+    core.policy.record(0.5)                                    # shared budget is used up...
+    scheduled = []
+    r = await core.handle(QueryRequest(prompt="design a system"), lambda fn, *a: scheduled.append(fn), own_key=True)
+    assert r.source == "cloud_llm"                             # ...but the visitor pays with their own key
+    assert core.policy.spent_today == pytest.approx(0.5)       # and their spend isn't added to it
+    assert scheduled == []                                     # their prompt doesn't land in the public cache
+
+
+@pytest.mark.asyncio
+async def test_rejected_own_key_says_so(make_core):
+    import httpx
+    core, ollama, cloud, cache, schedule = make_core(complex_prompt=True)
+    req = httpx.Request("POST", "https://example.invalid")
+    cloud.generate.side_effect = httpx.HTTPStatusError("bad key", request=req, response=httpx.Response(400, request=req))
+    with pytest.raises(GatewayError) as e:
+        await core.handle(QueryRequest(prompt="design a system"), schedule, own_key=True)
+    assert "rejected your key" in e.value.detail
+
+
+def test_query_uses_header_key_per_request(monkeypatch):
+    seen = {}
+
+    async def fake_generate(self, prompt, **kw):
+        seen["key"] = self.api_key
+        return "byok answer", 10, 0.0001
+    monkeypatch.setattr("app.services.cloud_service.CloudService.generate", fake_generate)
+    r = TestClient(app).post("/query", json={"prompt": "hi", "force_cloud": True}, headers={"X-Gemini-Key": "AIza-test"})
+    assert r.status_code == 200 and r.json()["response"] == "byok answer"
+    assert seen["key"] == "AIza-test"
+
+
+def test_query_rejects_garbage_key():
+    r = TestClient(app).post("/query", json={"prompt": "hi"}, headers={"X-Gemini-Key": "x" * 500})
+    assert r.status_code == 400
+
+
 def test_metrics_endpoint_exposes_gateway_series():
     r = TestClient(app).get("/metrics")
     assert r.status_code == 200

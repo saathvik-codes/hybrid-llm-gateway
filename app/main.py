@@ -1,6 +1,6 @@
 import os
 import logging
-from fastapi import FastAPI, HTTPException, Depends, BackgroundTasks, Response
+from fastapi import FastAPI, HTTPException, Depends, BackgroundTasks, Header, Response
 from fastapi.responses import HTMLResponse
 from contextlib import asynccontextmanager
 
@@ -87,12 +87,22 @@ async def query_gateway(
     ollama: OllamaService = Depends(get_ollama_service),
     cloud: CloudService = Depends(get_cloud_service),
     cache: SemanticCache = Depends(get_cache),
-    router: PromptRouter = Depends(get_router)
+    router: PromptRouter = Depends(get_router),
+    x_gemini_key: str | None = Header(None, description="Optional: your own Gemini key for this request only. "
+                                      "It is never stored or logged; your requests skip the shared budget and cache."),
 ):
+    own_key = (x_gemini_key or "").strip()
+    if own_key and (len(own_key) > 200 or not own_key.isascii()):
+        raise HTTPException(status_code=400, detail="That doesn't look like a Gemini API key.")
+    if own_key:
+        cloud = CloudService(api_key=own_key)       # per-request client; the shared one keeps the server's key
     try:
-        return await GatewayCore(ollama, cloud, cache, router).handle(request, background_tasks.add_task)
+        return await GatewayCore(ollama, cloud, cache, router).handle(request, background_tasks.add_task, own_key=bool(own_key))
     except GatewayError as e:
         raise HTTPException(status_code=e.status_code, detail=e.detail)
+    finally:
+        if own_key:
+            await cloud.close()
 
 # Admin Cache Endpoints
 @app.get("/api/cache")

@@ -40,6 +40,13 @@
   th { color: var(--faint); font: 500 .7rem/1 "JetBrains Mono", ui-monospace, monospace; letter-spacing: .12em; text-transform: uppercase; background: var(--sand); }
   td.num { text-align: right; font-family: "JetBrains Mono", ui-monospace, monospace; font-size: 12px; white-space: nowrap; color: var(--muted); }
   .empty { color: var(--faint); padding: 14px 10px; }
+  details.key { border: 1px solid var(--line); background: var(--surface); border-radius: 6px; padding: 10px 14px; margin-bottom: 12px; }
+  details.key summary { cursor: pointer; display: flex; justify-content: space-between; gap: 12px; align-items: baseline; }
+  details.key summary .meta { margin: 0; }
+  details.key input[type=password], details.key input[type=text] { flex: 1 1 260px; min-width: 0; padding: 6px 10px; border: 1px solid var(--line);
+         border-radius: 6px; background: var(--paper); font: 14px/1.5 "JetBrains Mono", ui-monospace, monospace; }
+  details.key input:focus { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .hint { color: var(--muted); font-size: 13px; margin: 8px 0 0; max-width: 70ch; }
   a { color: var(--accent); text-decoration-thickness: 1px; text-underline-offset: 3px; }
 </style>
 </head>
@@ -60,6 +67,20 @@
   </div>
 
   <h2>Try a prompt</h2>
+  <details class="key" id="key-box">
+    <summary><span>Use your own Gemini key</span> <span class="meta" id="key-state">optional</span></summary>
+    <div class="row" style="margin-top:8px">
+      <input type="password" id="key" autocomplete="off" spellcheck="false" placeholder="Paste a key from Google AI Studio">
+      <button id="key-show" type="button">Show</button>
+      <button id="key-forget" type="button">Forget</button>
+    </div>
+    <div class="row" style="margin-top:6px">
+      <label><input type="checkbox" id="key-remember"> Remember on this device</label>
+    </div>
+    <p class="hint">The key goes with your requests only, in a header. The server doesn't store or log it. Requests made
+      with it don't count toward the shared daily budget and aren't added to the public cache below.
+      No key yet? Get a free one at <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">aistudio.google.com/apikey</a>.</p>
+  </details>
   <textarea id="prompt" placeholder="Ask something. Short, simple prompts go to the local model; long or reasoning-heavy ones go to the cloud."></textarea>
   <div class="row">
     <label><input type="checkbox" id="force"> Force cloud model (skip cache and local)</label>
@@ -83,6 +104,34 @@ const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[c]));
 const yesNo = (v) => v ? '<span class="ok">connected</span>' : '<span class="bad">not available</span>';
 
+// ---- bring-your-own key: kept in this tab's memory; written to localStorage only if "Remember" is ticked ----
+const KEY_STORE = "gateway.geminiKey";
+let serverHasKey = false;
+const store = { get() { try { return localStorage.getItem(KEY_STORE) || ""; } catch { return ""; } },
+                set(v) { try { v ? localStorage.setItem(KEY_STORE, v) : localStorage.removeItem(KEY_STORE); } catch {} } };
+const userKey = () => $("key").value.trim();
+
+function showKeyState() {
+  const mine = userKey();
+  $("key-state").textContent = mine ? "using your key" : serverHasKey ? "optional" : "needed for cloud answers";
+  $("s-cloud").innerHTML = mine ? '<span class="ok">your key</span>'
+    : serverHasKey ? '<span class="ok">configured</span>' : '<span class="bad">no key – add yours below</span>';
+}
+
+(function initKey() {
+  const saved = store.get();
+  if (saved) { $("key").value = saved; $("key-remember").checked = true; }
+  $("key").oninput = () => { if ($("key-remember").checked) store.set(userKey()); showKeyState(); };
+  $("key-remember").onchange = () => store.set($("key-remember").checked ? userKey() : "");
+  $("key-show").onclick = () => {
+    const hidden = $("key").type === "password";
+    $("key").type = hidden ? "text" : "password";
+    $("key-show").textContent = hidden ? "Hide" : "Show";
+  };
+  $("key-forget").onclick = () => { $("key").value = ""; $("key-remember").checked = false; store.set(""); showKeyState(); };
+  showKeyState();
+})();
+
 async function getJSON(url, opts) {
   const r = await fetch(url, opts);
   const body = await r.json().catch(() => ({}));
@@ -95,7 +144,9 @@ async function loadStats() {
     const h = await getJSON("/health");
     $("s-status").innerHTML = h.status === "healthy" ? '<span class="ok">healthy</span>' : '<span class="bad">degraded</span>';
     $("s-local").innerHTML = yesNo(h.local_ollama_connected);
-    $("s-cloud").innerHTML = h.cloud_gemini_configured ? '<span class="ok">configured</span>' : '<span class="bad">no key</span>';
+    serverHasKey = !!h.cloud_gemini_configured;
+    if (!serverHasKey && !userKey()) $("key-box").open = true;     // no server key: the box is the way to get answers
+    showKeyState();
   } catch (e) { $("s-status").innerHTML = `<span class="bad">${esc(e.message)}</span>`; }
   try { $("s-cache").textContent = (await getJSON("/cache/stats")).cache_entries_count; } catch { $("s-cache").textContent = "–"; }
   try {
@@ -127,15 +178,18 @@ $("send").onclick = async () => {
   $("send").disabled = true;
   $("result").innerHTML = '<p class="meta">Waiting for an answer…</p>';
   try {
-    const r = await getJSON("/query", { method: "POST", headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({ prompt, force_cloud: $("force").checked }) });
+    const headers = {"Content-Type": "application/json"};
+    const mine = userKey();
+    if (mine) headers["X-Gemini-Key"] = mine;
+    const r = await getJSON("/query", { method: "POST", headers, body: JSON.stringify({ prompt, force_cloud: $("force").checked }) });
     $("result").innerHTML = `<pre>${esc(r.response)}</pre>
-      <p class="meta">from ${esc(r.source)} · ${r.latency_ms} ms · ${r.tokens_used} tokens · $${r.cost_usd.toFixed(6)}</p>`;
+      <p class="meta">from ${esc(r.source)} · ${r.latency_ms} ms · ${r.tokens_used} tokens · $${r.cost_usd.toFixed(6)}${mine ? " · your key" : ""}</p>`;
   } catch (e) {
-    $("result").innerHTML = `<p class="bad">${esc(e.message)}</p>`;
+    const hint = !userKey() && !serverHasKey ? " Paste your own Gemini key above to get cloud answers." : "";
+    $("result").innerHTML = `<p class="bad">${esc(e.message)}${hint}</p>`;
   } finally {
     $("send").disabled = false;
-    loadStats(); setTimeout(loadEntries, 1500);       // the answer is cached in the background
+    loadStats(); if (!userKey()) setTimeout(loadEntries, 1500);   // the answer is cached in the background
   }
 };
 
